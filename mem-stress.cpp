@@ -5,14 +5,19 @@
 #include <chrono>
 #include <mutex>
 #include <vector>
+#include "libs/CLI11.hpp"
 #include "sys/sysinfo.h"
 
 // Buffer que vai alocar a memoria do programa, volatile para evitar que o compilador otimize a leitura/escrita
 volatile char * buffer = nullptr;
 std::mutex bufferMutex;
 
+// Contador de erros nas operacoes de memoria
+int errCounter = 0;
+
 // Extrai o numero de uma linha do arquivo como "VmSize: 12345 kB"
-int parseLine(char* line){
+int parseLine(char* line)
+{
     int i = strlen(line);
     const char* p = line;
     while (*p <'0' || *p > '9') p++;
@@ -40,78 +45,182 @@ int getProcessMemUsage()
     return result;
 }
 
-long long getTotalAvailablePhysicalMemory()
+long long getTotalAvailableVirtualMemory()
 {
-  // cria uma variavel do tipo sysinfo
-  struct sysinfo memInfo;
+    // cria uma variavel do tipo sysinfo
+    struct sysinfo memInfo;
 
-  // popula a veriavel com os dados do sistema
-  sysinfo(&memInfo);
+    // popula a veriavel com os dados do sistema
+    sysinfo(&memInfo);
 
-  // inicializa com o total de ram fisica disponivel
-  long long totalPhysicalMem = memInfo.freeram;
-  totalPhysicalMem *= memInfo.mem_unit; // converte para bytes
+    // inicializa com o total de memoria disponivel
+    long long totalMem = memInfo.freeram + memInfo.freeswap;
+    totalMem *= memInfo.mem_unit; // converte para bytes
 
-  return totalPhysicalMem;
+    return totalMem;
 }
 
 long long calculateBufferSize(int percentLimit)
 {
-  long long totalAvailablePhysicalMem = getTotalAvailablePhysicalMemory();
-  return (totalAvailablePhysicalMem * percentLimit) / 100;
+    long long totalAvailablePhysicalMem = getTotalAvailableVirtualMemory();
+    return (totalAvailablePhysicalMem * percentLimit) / 100;
 }
 
-void stressMemoryThread(std::chrono::time_point<std::chrono::steady_clock> finishTime, long long bufferSize)
+void invertBinaryValueThread(std::chrono::time_point<std::chrono::steady_clock> finishTime, long long bufferSize)
 {
-  std::random_device randomDevice;
-  std::mt19937_64 generator(randomDevice());
-  std::uniform_int_distribution<long long> distMemPosition(0, bufferSize - 1);
+    std::random_device randomDevice;
+    std::mt19937_64 memPositionGenerator(randomDevice());
+    std::uniform_int_distribution<long long> memPositionDistribution(0, bufferSize - 1);
 
-  while (finishTime > std::chrono::steady_clock::now())
-  {
-    std::lock_guard<std::mutex> guard(bufferMutex);
+    while (finishTime > std::chrono::steady_clock::now())
+    {
+        std::lock_guard<std::mutex> guard(bufferMutex);
 
-    long long memoryPosition = distMemPosition(generator);
-    char dataInMemory = buffer[memoryPosition];
-    buffer[memoryPosition] = (char) (rand() % 256);
-  }
+        long long memoryPosition = memPositionDistribution(memPositionGenerator);
+
+        int oldData = buffer[memoryPosition];
+
+        // Operador ~ inverte o valor binario
+        buffer[memoryPosition] = ~buffer[memoryPosition];
+
+        if (buffer[memoryPosition] != ~oldData)
+        {
+            std::cout << "Error while inverting binary" << std::endl;
+            errCounter++;
+        }
+    }
 }
 
-int main()
+void swapValuesThread(std::chrono::time_point<std::chrono::steady_clock> finishTime, long long bufferSize)
 {
-  int qtyCores = 8;
-  int percentLimit = 35;
-  int minutesToRun = 1;
+    std::random_device randomDevice;
+    std::mt19937_64 memPositionGenerator(randomDevice());
+    std::uniform_int_distribution<long long> memPositionDistribution(0, bufferSize - 1);
 
-  long long bufferSize = calculateBufferSize(percentLimit);
+    while (finishTime > std::chrono::steady_clock::now())
+    {
+        std::lock_guard<std::mutex> guard(bufferMutex);
 
-  try
-  {
-    buffer = new char[bufferSize];
-    // memset preenche x espacos do bloco de memoria com caracteres aleatorios
-    memset((void*)buffer, 0, bufferSize); 
-  }
-  catch (const std::bad_alloc& e)
-  {
-    std::cerr << "Memory allocation failed: " << e.what() << std::endl;
-    return 1;
-  }
+        long long firstMemoryPosition = memPositionDistribution(memPositionGenerator);
+        long long secondMemoryPosition = memPositionDistribution(memPositionGenerator);
 
-  std::chrono::time_point finishTime = std::chrono::steady_clock::now() + std::chrono::minutes(minutesToRun);
+        char firstDataInMemory = buffer[firstMemoryPosition];
+        char secondDataInMemory = buffer[secondMemoryPosition];
 
-  std::vector<std::thread> threads;
+        // Operador ~ inverte o valor binario
+        buffer[firstMemoryPosition] = secondDataInMemory;
+        buffer[secondMemoryPosition] = firstDataInMemory;
 
-  // Aloca 2 threads por nucleo
-  for (int i = 0; i < std::thread::hardware_concurrency() * 2; i++)
-  {
-    threads.push_back(std::thread(stressMemoryThread, finishTime, bufferSize));
-  }
+        if (buffer[firstMemoryPosition] != secondDataInMemory || buffer[secondMemoryPosition] != firstDataInMemory)
+        {
+            std::cout << "Error while swapping values" << std::endl;
+            errCounter++;
+        }
+    }
+}
 
-  // Impede que o programa feche antes das threads finalizarem
-  for (auto& thread : threads) {
-    thread.join(); 
-  }
+void writePattern(long long startIndex, long long finalIndex)
+{
 
-  delete[] buffer;
-  return 0;
+    for (long long i = startIndex; i < finalIndex; i++)
+    {
+        // std::lock_guard<std::mutex> guard(bufferMutex);
+        buffer[i] = i % 2 == 0 ? 0x55 : 0xAA;
+    }
+}
+
+void fillBuffer(long long bufferSize, int qtyCores)
+{
+    std::vector<std::thread> threads;
+
+    long long sizeToFill = bufferSize / (qtyCores * 2);
+
+    std::cout << "Memory to fill each thread: " << sizeToFill << std::endl;
+
+    for (int i = 0; i < qtyCores * 2; i++)
+    {
+        long long startIndex = i * sizeToFill;
+
+        // Se for a ultima thread, preenche ate o final
+        long long finalIndex = i == (qtyCores * 2 - 1)
+            ? bufferSize
+            :  (i + 1) * sizeToFill;
+
+        threads.push_back(std::thread(writePattern, startIndex, finalIndex));
+    }
+
+    // Impede que o programa feche antes das threads finalizarem
+    for (auto& thread : threads) {
+        thread.join();
+    }
+}
+
+int main(int argc, char **argv)
+{
+    CLI::App app;
+
+    int qtyCores{1};
+    app.add_option("--cores", qtyCores, "Quantity of cores to stress");
+
+    int percentLimit{60};
+    app.add_option("--perc", percentLimit, "Percentage limit of memory use");
+
+    int minutesToRun{1};
+    app.add_option("--min", minutesToRun, "Minutes to run");
+
+    CLI11_PARSE(app, argc, argv);
+
+    std::cout << "Memory Stresser started!" << std::endl;
+    std::cout << "CPU cores to use: " << qtyCores << std::endl;
+    std::cout << "Mem use limit (%): " << percentLimit << std::endl;
+    std::cout << "Minutes to run: " << minutesToRun << std::endl;
+
+    if (qtyCores > std::thread::hardware_concurrency())
+    {
+        std::cerr << "Cores quantity too high" << std::endl;
+        return 1;
+    }
+
+    long long bufferSize = calculateBufferSize(percentLimit);
+
+    try
+    {
+        buffer = new char[bufferSize];
+        // para preencher o buffer rapido precisaria usar memset, mas nao da
+        // para preencher com patterns
+        fillBuffer(bufferSize, qtyCores);
+    }
+    catch (const std::bad_alloc& e)
+    {
+        std::cerr << "Memory allocation failed: " << e.what() << std::endl;
+        return 1;
+    }
+
+    std::chrono::time_point finishTime = std::chrono::steady_clock::now() + std::chrono::minutes(minutesToRun);
+
+    std::vector<std::thread> threads;
+
+
+    // Aloca 2 threads por nucleo
+    for (int i = 0; i < qtyCores * 2; i++)
+    {
+        // std::random_device randomDevice;
+        // std::mt19937_64 threadTypeGenerator(randomDevice2());
+        // std::uniform_int_distribution<long long> threadTypeDistribution(0, 2);
+        if (i % 2 == 0)
+        {
+            threads.push_back(std::thread(invertBinaryValueThread, finishTime, bufferSize));
+        } else {
+            threads.push_back(std::thread(swapValuesThread, finishTime, bufferSize));
+        }
+    }
+
+    // Impede que o programa feche antes das threads finalizarem
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    delete[] buffer;
+
+    return 0;
 }
