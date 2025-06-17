@@ -78,14 +78,17 @@ void invertBinaryValueThread(std::chrono::time_point<std::chrono::steady_clock> 
 
         long long memoryPosition = memPositionDistribution(memPositionGenerator);
 
-        int oldData = buffer[memoryPosition];
+        char oldData = buffer[memoryPosition];
 
         // Operador ~ inverte o valor binario
         buffer[memoryPosition] = ~buffer[memoryPosition];
 
+        std::cout
+            << "Posição " << memoryPosition << " inverteu os bits.\r"
+            << std::flush;
+
         if (buffer[memoryPosition] != ~oldData)
         {
-            std::cout << "Error while inverting binary" << std::endl;
             errCounter++;
         }
     }
@@ -111,9 +114,13 @@ void swapValuesThread(std::chrono::time_point<std::chrono::steady_clock> finishT
         buffer[firstMemoryPosition] = secondDataInMemory;
         buffer[secondMemoryPosition] = firstDataInMemory;
 
+        std::cout
+            << "Posição " << firstMemoryPosition
+            << " trocou de valor com " << secondMemoryPosition << ".\r"
+            << std::flush;
+
         if (buffer[firstMemoryPosition] != secondDataInMemory || buffer[secondMemoryPosition] != firstDataInMemory)
         {
-            std::cout << "Error while swapping values" << std::endl;
             errCounter++;
         }
     }
@@ -129,20 +136,18 @@ void writePattern(long long startIndex, long long finalIndex)
     }
 }
 
-void fillBuffer(long long bufferSize, int qtyCores)
+void fillBuffer(long long bufferSize, int qtyThreads)
 {
     std::vector<std::thread> threads;
 
-    long long sizeToFill = bufferSize / (qtyCores * 2);
+    long long sizeToFill = bufferSize / (qtyThreads * 2);
 
-    std::cout << "Memory to fill each thread: " << sizeToFill << std::endl;
-
-    for (int i = 0; i < qtyCores * 2; i++)
+    for (int i = 0; i < qtyThreads * 2; i++)
     {
         long long startIndex = i * sizeToFill;
 
         // Se for a ultima thread, preenche ate o final
-        long long finalIndex = i == (qtyCores * 2 - 1)
+        long long finalIndex = i == (qtyThreads * 2 - 1)
             ? bufferSize
             :  (i + 1) * sizeToFill;
 
@@ -159,8 +164,8 @@ int main(int argc, char **argv)
 {
     CLI::App app;
 
-    int qtyCores{1};
-    app.add_option("--cores", qtyCores, "Quantity of cores to stress");
+    int qtyThreads{4};
+    app.add_option("--threads", qtyThreads, "Quantidade de threads para estressar a memória");
 
     int percentLimit{60};
     app.add_option("--perc", percentLimit, "Percentage limit of memory use");
@@ -170,25 +175,21 @@ int main(int argc, char **argv)
 
     CLI11_PARSE(app, argc, argv);
 
-    std::cout << "Memory Stresser started!" << std::endl;
-    std::cout << "CPU cores to use: " << qtyCores << std::endl;
-    std::cout << "Mem use limit (%): " << percentLimit << std::endl;
-    std::cout << "Minutes to run: " << minutesToRun << std::endl;
-
-    if (qtyCores > std::thread::hardware_concurrency())
-    {
-        std::cerr << "Cores quantity too high" << std::endl;
-        return 1;
-    }
+    std::cout << "Inicializando estressador de memória!" << std::endl;
+    std::cout << "Threads rodando: " << qtyThreads << std::endl;
+    std::cout << "Limite de uso de memória (%): " << percentLimit << std::endl;
+    std::cout << "Tempo para executar (min): " << minutesToRun << "\n" << std::endl;
 
     long long bufferSize = calculateBufferSize(percentLimit);
 
     try
     {
+        std::cout << "Preenchendo o buffer de memória... " << std::flush;
+
         buffer = new char[bufferSize];
-        // para preencher o buffer rapido precisaria usar memset, mas nao da
-        // para preencher com patterns
-        fillBuffer(bufferSize, qtyCores);
+        fillBuffer(bufferSize, qtyThreads);
+
+        std::cout << "Memória preenchida!\n" << std::endl;
     }
     catch (const std::bad_alloc& e)
     {
@@ -202,7 +203,7 @@ int main(int argc, char **argv)
 
 
     // Aloca 2 threads por nucleo
-    for (int i = 0; i < qtyCores * 2; i++)
+    for (int i = 0; i < qtyThreads * 2; i++)
     {
         // std::random_device randomDevice;
         // std::mt19937_64 threadTypeGenerator(randomDevice2());
