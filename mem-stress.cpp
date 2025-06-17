@@ -5,8 +5,13 @@
 #include <chrono>
 #include <mutex>
 #include <vector>
+#include <string>
 #include "libs/CLI11.hpp"
 #include "sys/sysinfo.h"
+
+#ifdef _WIN32
+    #include <windows.h>
+#endif
 
 // Buffer que vai alocar a memoria do programa, volatile para evitar que o compilador otimize a leitura/escrita
 volatile char * buffer = nullptr;
@@ -15,49 +20,29 @@ std::mutex bufferMutex;
 // Contador de erros nas operacoes de memoria
 int errCounter = 0;
 
-// Extrai o numero de uma linha do arquivo como "VmSize: 12345 kB"
-int parseLine(char* line)
-{
-    int i = strlen(line);
-    const char* p = line;
-    while (*p <'0' || *p > '9') p++;
-    line[i-3] = '\0';
-    i = atoi(p);
-    return i;
-}
-
-// Busca o uso de memoria do processo atual em KB
-int getProcessMemUsage()
-{
-    // pega arquivo do /proc/self, que contem detalhes do processo do Linux
-    FILE* file = fopen("/proc/self/status", "r");
-    int result = -1;
-    char line[128];
-
-    // Le linha por lnha ate achar o VmSize (Virtua memory)
-    while (fgets(line, 128, file) != NULL){
-        if (strncmp(line, "VmSize:", 7) == 0){
-            result = parseLine(line);
-            break;
-        }
-    }
-    fclose(file);
-    return result;
-}
-
 long long getTotalAvailableVirtualMemory()
 {
-    // cria uma variavel do tipo sysinfo
-    struct sysinfo memInfo;
 
-    // popula a veriavel com os dados do sistema
-    sysinfo(&memInfo);
+    #ifdef linux
+        // cria uma variavel do tipo sysinfo
+        struct sysinfo memInfo;
 
-    // inicializa com o total de memoria disponivel
-    long long totalMem = memInfo.freeram + memInfo.freeswap;
-    totalMem *= memInfo.mem_unit; // converte para bytes
+        // popula a veriavel com os dados do sistema
+        sysinfo(&memInfo);
 
-    return totalMem;
+        // inicializa com o total de memoria disponivel
+        long long totalMem = memInfo.freeram + memInfo.freeswap;
+        totalMem *= memInfo.mem_unit; // converte para bytes
+
+        return totalMem;
+    #endif
+
+    #ifdef _WIN32
+        MEMORYSTATUSEX status;
+        status.dwLength = sizeof(status);
+        GlobalMemoryStatusEx(&status);
+        return status.ullAvailPageFile;
+    #endif
 }
 
 long long calculateBufferSize(int percentLimit)
@@ -66,6 +51,7 @@ long long calculateBufferSize(int percentLimit)
     return (totalAvailablePhysicalMem * percentLimit) / 100;
 }
 
+// Thread que inverte o valor binario da posicao
 void invertBinaryValueThread(std::chrono::time_point<std::chrono::steady_clock> finishTime, long long bufferSize)
 {
     std::random_device randomDevice;
@@ -77,6 +63,8 @@ void invertBinaryValueThread(std::chrono::time_point<std::chrono::steady_clock> 
         std::lock_guard<std::mutex> guard(bufferMutex);
 
         long long memoryPosition = memPositionDistribution(memPositionGenerator);
+
+        if (memoryPosition >= bufferSize) continue;
 
         char oldData = buffer[memoryPosition];
 
@@ -94,6 +82,7 @@ void invertBinaryValueThread(std::chrono::time_point<std::chrono::steady_clock> 
     }
 }
 
+// Thread que faz o swap do valor de duas posicoes
 void swapValuesThread(std::chrono::time_point<std::chrono::steady_clock> finishTime, long long bufferSize)
 {
     std::random_device randomDevice;
@@ -106,6 +95,8 @@ void swapValuesThread(std::chrono::time_point<std::chrono::steady_clock> finishT
 
         long long firstMemoryPosition = memPositionDistribution(memPositionGenerator);
         long long secondMemoryPosition = memPositionDistribution(memPositionGenerator);
+
+        if (firstMemoryPosition >= bufferSize || secondMemoryPosition >= bufferSize) continue;
 
         char firstDataInMemory = buffer[firstMemoryPosition];
         char secondDataInMemory = buffer[secondMemoryPosition];
@@ -126,16 +117,16 @@ void swapValuesThread(std::chrono::time_point<std::chrono::steady_clock> finishT
     }
 }
 
+// Preenche parte do buffer com o padrao, nao usa mutex pois a posicao eh fixa
 void writePattern(long long startIndex, long long finalIndex)
 {
-
     for (long long i = startIndex; i < finalIndex; i++)
     {
-        // std::lock_guard<std::mutex> guard(bufferMutex);
         buffer[i] = i % 2 == 0 ? 0x55 : 0xAA;
     }
 }
 
+// Chamada para preecher buffer
 void fillBuffer(long long bufferSize, int qtyThreads)
 {
     std::vector<std::thread> threads;
@@ -162,6 +153,7 @@ void fillBuffer(long long bufferSize, int qtyThreads)
 
 int main(int argc, char **argv)
 {
+    // inicializa o CLI11, lib para passar parametros no executavel
     CLI::App app;
 
     int qtyThreads{4};
@@ -201,13 +193,9 @@ int main(int argc, char **argv)
 
     std::vector<std::thread> threads;
 
-
     // Aloca 2 threads por nucleo
     for (int i = 0; i < qtyThreads * 2; i++)
     {
-        // std::random_device randomDevice;
-        // std::mt19937_64 threadTypeGenerator(randomDevice2());
-        // std::uniform_int_distribution<long long> threadTypeDistribution(0, 2);
         if (i % 2 == 0)
         {
             threads.push_back(std::thread(invertBinaryValueThread, finishTime, bufferSize));
@@ -222,6 +210,10 @@ int main(int argc, char **argv)
     }
 
     delete[] buffer;
+
+    std::cout << std::endl;
+    std::cout << "Quantidade detectada de erros de memória: " << errCounter << std::endl;
+    std::cout << "Programa finalizado" << std::endl;
 
     return 0;
 }
